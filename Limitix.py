@@ -20,7 +20,7 @@ def execute_command(ssh, command):
         return None, f"Command Execution Failed: {str(e)}"
 
 # Streamlit UI
-st.title("Aplikasi Monitoring dan Manajemen Mikrotik")
+st.title("LIMITIX")
 st.sidebar.header("Pilih Fitur")
 
 # Sidebar options
