@@ -1,5 +1,5 @@
 import streamlit as st
-import paramiko
+import paramiko as pm
 
 # Function to establish SSH connection
 def connect_ssh(ip, username, password, port):
@@ -18,6 +18,8 @@ def execute_command(ssh, command):
         return stdout.read().decode('utf-8'), stderr.read().decode('utf-8')
     except Exception as e:
         return None, f"Command Execution Failed: {str(e)}"
+
+
 
 # Streamlit UI
 st.title("LIMITIX")
