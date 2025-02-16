@@ -78,73 +78,58 @@ else:
     # Manajemen IP Address
     elif menu == "Manajemen IP Address":
         st.subheader("Manajemen IP Address")
-        
-        # Menampilkan daftar IP Address dan Interface yang ada dalam tabel
-        list_command = "/ip address print terse"
-        output, _ = execute_command(st.session_state.ssh_client, list_command)
-        
-        ip_data = []
-        for line in output.split("\n"):
-            parts = line.split()
-            if len(parts) >= 3:
-                ip_address_value = parts[1].replace("address=", "")
-                interface_value = parts[3].replace("interface=", "")
-                ip_data.append({"IP Address": ip_address_value, "Interface": interface_value})
-        
-        if ip_data:
-            df = pd.DataFrame(ip_data)
-            st.table(df)
-        else:
-            st.write("Tidak ada data IP Address yang ditemukan.")
-        
-        ip_address = st.text_input("Masukkan IP Address (Gunakan format CIDR, misal: 192.168.1.100/24)")
+        ip_address = st.text_input("Masukkan IP Address")
         interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "ether3", "wlan1", "wlan2"])
-        action = st.selectbox("Pilih Aksi", ["Tambahkan", "Hapus"])
-        execute_btn = st.button("Eksekusi")
+        add_ip_btn = st.button("Tambahkan IP")
 
-        if execute_btn and st.session_state.ssh_client:
-            output, _ = execute_command(st.session_state.ssh_client, list_command)
-            
-            if action == "Tambahkan":
-                if any(ip_address in line and interface in line for line in output.split("\n")):
-                    st.warning(f"IP {ip_address} pada {interface} sudah ada.")
-                else:
-                    command = f"/ip address add address={ip_address} interface={interface}"
-                    output, error = execute_command(st.session_state.ssh_client, command)
-                    if error:
-                        st.error(error)
-                    else:
-                        st.success(f"IP {ip_address} berhasil ditambahkan pada {interface}.")
-            else:
-                lines = output.split("\n")
-                ip_id = None
-                for line in lines:
-                    if ip_address in line and interface in line:
-                        ip_id = line.split()[0]
-                        break
-                
-                if ip_id:
-                    command = f"/ip address remove {ip_id}"
-                    output, error = execute_command(st.session_state.ssh_client, command)
-                    if error:
-                        st.error(error)
-                    else:
-                        st.success(f"IP {ip_address} pada {interface} berhasil dihapus.")
-                else:
-                    st.warning(f"Tidak ditemukan IP {ip_address} pada {interface}.")
-    
-    # Konfigurasi Wireless
-    elif menu == "Konfigurasi Wireless":
-        st.subheader("Konfigurasi Wireless")
-        ssid = st.text_input("SSID")
-        wifi_password = st.text_input("Password Wireless", type="password")
-        interface = st.selectbox("Pilih Interface", ["wlan1", "wlan2", "wlan3"])
-        configure_btn = st.button("Konfigurasi")
-
-        if configure_btn and st.session_state.ssh_client:
-            command = f"/interface wireless set {interface} ssid={ssid} password={wifi_password}"
+        if add_ip_btn and st.session_state.ssh_client:
+            command = f"/ip address add address={ip_address} interface={interface}"
             output, error = execute_command(st.session_state.ssh_client, command)
             if error:
                 st.error(error)
             else:
-                st.success("Wireless berhasil dikonfigurasi")
+                st.success(f"IP Address {ip_address} berhasil ditambahkan pada {interface}.")
+
+    # Konfigurasi Wireless
+    elif menu == "Konfigurasi Wireless":
+        st.subheader("Konfigurasi Wireless")
+        ssid = st.text_input("Masukkan SSID")
+        password = st.text_input("Masukkan Password", type="password")
+        configure_btn = st.button("Terapkan Konfigurasi")
+
+        if configure_btn and st.session_state.ssh_client:
+            command = f"/interface wireless set wlan1 ssid={ssid} password={password}"
+            output, error = execute_command(st.session_state.ssh_client, command)
+            if error:
+                st.error(error)
+            else:
+                st.success("Konfigurasi Wireless berhasil diterapkan.")
+
+    # Pembatasan & Monitoring Bandwidth
+    elif menu == "Pembatasan & Monitoring Bandwidth":
+        st.subheader("Pembatasan & Monitoring Bandwidth")
+        
+        # Memasukkan batas maksimal bandwidth
+        bandwidth_limit = st.text_input("Masukkan batas maksimal bandwidth (kbps)")
+        interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "ether3", "wlan1", "wlan2"])
+        limit_btn = st.button("Terapkan Batas Bandwidth")
+
+        if limit_btn and st.session_state.ssh_client:
+            command = f"/queue simple add name=Limit_{interface} target={interface} max-limit={bandwidth_limit}k"
+            output, error = execute_command(st.session_state.ssh_client, command)
+            if error:
+                st.error(error)
+            else:
+                st.success(f"Batas bandwidth {bandwidth_limit} kbps berhasil diterapkan pada {interface}.")
+                
+        # Monitoring Bandwidth
+        monitor_btn = st.button("Mulai Monitoring")
+
+        if monitor_btn and st.session_state.ssh_client:
+            command = f"/interface monitor-traffic interface={interface} once"
+            output, error = execute_command(st.session_state.ssh_client, command)
+            if error:
+                st.error(error)
+            else:
+                st.text("Output Monitoring:")
+                st.code(output)
