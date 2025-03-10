@@ -3,6 +3,7 @@ import paramiko
 import time
 import re
 import pandas as pd
+import ipaddress
 from streamlit_extras.app_logo import add_logo
 from streamlit_option_menu import option_menu
 
@@ -38,6 +39,42 @@ def logout():
         del st.session_state["username"]
         st.success("✅ You have logged out successfully!")
         st.stop()
+        
+def get_subnet(interface):
+    """Fungsi untuk mendapatkan subnet dari interface yang dipilih."""
+    command = f"/ip address print where interface={interface}"
+    output, error = execute_command(st.session_state.ssh_client, command)
+
+    if error or not output or not isinstance(output, str) or not output.strip():
+        return None  # Jika output None atau kosong, kembalikan None
+
+    lines = output.strip().split("\n")
+    for line in lines:
+        parts = line.split()
+        for part in parts:
+            if '/' in part:
+                return part  # Mengembalikan subnet (contoh: 192.168.1.1/24)
+
+    return None
+
+    
+    return None
+
+def validate_ip_range(start_suffix, end_suffix, subnet):
+    """Memeriksa apakah rentang IP berada dalam subnet yang benar."""
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+        base_ip = str(network.network_address).rsplit('.', 1)[0]  # Ambil bagian awal IP (contoh: 192.168.1)
+        
+        start_ip = ipaddress.ip_address(f"{base_ip}.{start_suffix}")
+        end_ip = ipaddress.ip_address(f"{base_ip}.{end_suffix}")
+        
+        return start_ip in network and end_ip in network and start_ip < end_ip
+    except ValueError:
+        return False
+    
+def page_2():
+    st.title(st.session_state.get("username", "User"))
 
 # **LOGIN FORM**
 if not st.session_state.get("logged_in"):
@@ -67,12 +104,12 @@ else:
     st.title("🚀 LIMITIX - MikroTik Manager")
     with st.sidebar:
         add_logo("https://upload.wikimedia.org/wikipedia/commons/4/42/MikroTik_Logo.png", height=80)
-        if st.button("👤" + st.session_state.get("username", "User")):
+        if st.navigation([page_2, "Limitix.py"]):
             st.session_state["menu"] = "User",
         menu = option_menu(
             "Menu" ,
-            ["Dashboard", "Manajemen IP Address", "Konfigurasi Wireless", "Firewall NAT", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth"],
-            icons=["house", "list-task", "wifi", "shield", "globe", "router", "server", "speedometer"],
+            ["Dashboard", "Manajemen IP Address", "Firewall NAT", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth"],
+            icons=["house", "list-task", "shield", "globe", "router", "server", "speedometer"],
             default_index=0
         )
         if st.button("🚪 Logout"):
@@ -106,7 +143,6 @@ else:
         st.markdown("""
         **Fitur yang tersedia:**
         - 🌐 **Manajemen IP Address**
-        - 📡 **Konfigurasi Wireless**
         - 🔥 **Firewall NAT**
         - 🌎 **Konfigurasi DNS**
         - 🖥️ **DHCP Client**
@@ -213,44 +249,6 @@ else:
                     else:
                         st.error(f"⚠️ IP {ip_address} tidak ditemukan di interface {interface}.")
 
-
-# **KONFIGURASI WIRELESS**
-    elif menu == "Konfigurasi Wireless":
-        st.subheader("📡 Konfigurasi Wireless")
-        
-        # Menampilkan daftar SSID yang telah dikonfigurasi
-        list_ssid_command = "/interface wireless print"
-        output, error = execute_command(st.session_state.ssh_client, list_ssid_command)
-        
-        if error:
-            st.error(f"⚠️ Gagal mengambil daftar SSID: {error}")
-        else:
-            st.text(output)
-        
-        interface = st.selectbox("Pilih Interface Wireless", ["wlan1", "wlan2"])
-        new_ssid = st.text_input("Masukkan SSID Baru")
-        new_password = st.text_input("Masukkan Password Baru", type="password")
-        wireless_mode = st.selectbox("Pilih Mode Wireless", ["ap-bridge", "station", "bridge", "wds-slave"])
-        save_btn = st.button("Simpan Konfigurasi")
-        
-        if save_btn:
-            if not new_ssid or not new_password:
-                st.warning("⚠️ Harap isi SSID dan Password!")
-                st.stop()
-
-            commands = [
-                f'/interface wireless set {interface} ssid="{new_ssid}"',
-                f'/interface wireless security-profiles set default authentication-types=wpa2-psk wpa2-pre-shared-key="{new_password}"',
-                f'/interface wireless set {interface} mode={wireless_mode}'
-            ]
-
-            for cmd in commands:
-                output, error = execute_command(st.session_state.ssh_client, cmd)
-                if error:
-                    st.error(f"⚠️ Gagal mengeksekusi: {error}")
-                    break
-            else:
-                st.success("✅ Konfigurasi Wireless berhasil diperbarui!")
         
 
     # **FIREWALL NAT**
@@ -351,7 +349,6 @@ else:
     elif menu == "DHCP Server":
         st.subheader("🖧 Konfigurasi DHCP Server")
 
-        # Menampilkan daftar DHCP Server yang telah dikonfigurasi dalam bentuk tabel
         st.caption("📜 Daftar DHCP Server")
         list_ds_command = "/ip dhcp-server print terse"
         output, error = execute_command(st.session_state.ssh_client, list_ds_command)
@@ -360,15 +357,15 @@ else:
             st.error(f"⚠️ Gagal mengambil daftar DHCP server: {error}")
         else:
             dhcp_data = []
-            if output and isinstance(output, str) and output.strip():  # Cek apakah output tidak kosong
+            if output and isinstance(output, str) and output.strip():
                 lines = output.strip().split("\n")
-                headers = ["ID", "INTERFACE", "ADDRESS POOL", "LEASE TIME", "STATUS"]
-
+                headers = ["ID", "NAME", "INTERFACE", "RENTANG IP", "DURASI"]
+                
                 for line in lines:
                     parts = line.split()
-                    if len(parts) >= 5:  # Pastikan jumlah kolom cukup
-                        dhcp_data.append(parts[:5])
-
+                    if len(parts) >= 6:
+                        dhcp_data.append(parts[:6])
+                
                 if dhcp_data:
                     df = pd.DataFrame(dhcp_data, columns=headers)
                     st.table(df)
@@ -376,30 +373,70 @@ else:
                     st.warning("⚠️ Tidak ada data DHCP Server yang tersedia.")
             else:
                 st.warning("⚠️ Tidak ada output yang diterima dari perintah SSH.")
-    
+
         interface = st.selectbox("Pilih Interface", ["bridge", "ether1", "ether2", "wlan1"])
         
+        subnet = get_subnet(interface)
+        
+        gateway = ""
+        if subnet:
+            base_ip = str(ipaddress.ip_network(subnet, strict=False).network_address).rsplit('.', 1)[0]
+            gateway = f"{base_ip}.1"  # Mengatur gateway default sebagai .1 dari subnet
+        gateway = st.text_input("Masukkan Gateway", value=gateway)
+
+        st.subheader("Rentang Ip Address")
         col1, col2 = st.columns(2)
         with col1:
-            pool_start = st.text_input("Address Pool Awal", placeholder="192.168.1.10")
+            pool_start_suffix = st.text_input("Awal (0-255)", placeholder="10")
         with col2:
-            pool_end = st.text_input("Address Pool Akhir", placeholder="192.168.1.100")
+            pool_end_suffix = st.text_input("Akhir (0-255)", placeholder="100")
 
-        gateway = st.text_input("Masukkan Gateway (Misal: 192.168.1.1)")
-        dns_server = st.text_input("Masukkan DNS Server (Misal: 8.8.8.8)")
-        lease_time = st.text_input("Masukkan Lease Time (Misal: 12h)")
+   
+        # Mengambil daftar DNS dari DHCP Server
+        list_dns_command = "/ip dhcp-server print terse"
+        dns_servers = ["Google DNS (8.8.8.8, 8.8.4.4)", "Custom"]
+        output, error = execute_command(st.session_state.ssh_client, list_dns_command)
+        if not error and output:
+            dns_servers.extend([line.split()[0] for line in output.strip().split("\n") if line.strip()])
+
+        # Sidebar untuk pemilihan DNS
+        st.markdown("### Pilih Opsi DNS")
+        dns_option = st.radio("", ["Google DNS (8.8.8.8, 8.8.4.4)", "Custom"])
+        
+        
+        dns_server = ""
+        if dns_option == "Custom":
+            dns_server = st.text_input("Masukkan DNS Server", placeholder="8.8.8.8")
+        elif dns_option == "Google DNS (8.8.8.8, 8.8.4.4)":
+            dns_server = "8.8.8.8, 8.8.4.4"
+
+        st.subheader("Durasi DHCP Server")
+        lease_time_option = st.selectbox("", ["12jam", "1hari", "3hari", "Custom"])
+
+        lease_time = ""
+        if lease_time_option == "Custom":
+            lease_time_server = st.text_input("Masukkan Durasi", placeholder="12 jam")
+        elif  lease_time_option == "12jam":
+            lease_time = "12h"
+        elif  lease_time_option == "1hari":
+            lease_time = "1d"
+        elif  lease_time_option == "3hari":
+            lease_time = "3d"
 
         save_btn = st.button("Simpan DHCP Server")
 
         if save_btn:
-            if not (pool_start and pool_end and gateway and dns_server and lease_time):
+            if not (pool_start_suffix and pool_end_suffix and gateway and dns_server and lease_time and subnet):
                 st.error("⚠️ Semua kolom harus diisi sebelum menyimpan konfigurasi DHCP Server!")
+            elif not validate_ip_range(pool_start_suffix, pool_end_suffix, subnet):
+                st.error("⚠️ Rentang IP yang dimasukkan tidak valid dalam subnet interface!")
             else:
-                address_pool = f"{pool_start}-{pool_end}"
+                base_ip = str(ipaddress.ip_network(subnet, strict=False).network_address).rsplit('.', 1)[0]
+                address_pool = f"{base_ip}.{pool_start_suffix}-{base_ip}.{pool_end_suffix}"
                 commands = [
                     f"/ip pool add name=dhcp_pool ranges={address_pool}",
                     f"/ip dhcp-server add interface={interface} address-pool=dhcp_pool disabled=no lease-time={lease_time}",
-                    f"/ip dhcp-server network add address={gateway}/24 gateway={gateway} dns-server={dns_server}"
+                    f"/ip dhcp-server network add address={subnet} gateway={gateway} dns-server={dns_server}"
                 ]
 
                 for cmd in commands:
@@ -409,10 +446,11 @@ else:
                         break
                 else:
                     st.success("✅ DHCP Server berhasil dikonfigurasi!")
+
                 
     # Limitasi & Monitoring Bandwidth
     elif menu == "Bandwidth":
-        st.subheader("📊 Limitasi & Monitoring Bandwidth (Queue Tree)")
+        st.subheader("📊 Limitasi & Monitoring Bandwidth")
 
         # Input batas bandwidth & interface
         bandwidth_limit = st.text_input("Masukkan batas bandwidth (kbps)", value="1000")
