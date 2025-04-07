@@ -45,6 +45,9 @@ def parse_rate(rate_str):
             return int(float(rate_str))
     except:
         return 0
+    
+def get_network_address(subnet):
+    return str(ipaddress.ip_network(subnet, strict=False))
 
 
 # Fungsi Logout
@@ -56,7 +59,7 @@ def logout():
         st.success("✅ You have logged out successfully!")
         st.stop()
         
-def get_subnet(interface):
+def get_ip(interface):
     """Fungsi untuk mendapatkan subnet dari interface yang dipilih."""
     if not interface:
         return None  # Jika interface kosong, kembalikan None
@@ -128,26 +131,6 @@ else:
         )
         if st.button("🚪 Logout"):
             logout()
-
-
-
-    # **USER MANAGEMENT**
-    if menu == "User":
-        st.subheader("👤 Edit User")
-        new_username = st.text_input("Masukkan Username Baru")
-        new_password = st.text_input("Masukkan Password Baru", type="password")
-        save_user_btn = st.button("Simpan Perubahan")
-        
-        if save_user_btn:
-            if new_username and new_password:
-                cmd = f"/user set [find name={st.session_state['username']}] name={new_username} password={new_password}"
-                output, error = execute_command(st.session_state["ssh_client"], cmd)
-                if error:
-                    st.error(f"⚠️ Gagal memperbarui user: {error}")
-                else:
-                    st.success("✅ Username dan Password berhasil diperbarui!")
-            else:
-                st.warning("⚠️ Harap isi semua kolom.")
 
 
     # **DASHBOARD**
@@ -435,115 +418,96 @@ else:
     
     # **DHCP Server**
     elif menu == "DHCP Server":
-        st.subheader("🖧 Konfigurasi DHCP Server")
+        st.subheader("🏠 Konfigurasi DHCP Server")
 
-        # Perintah untuk mendapatkan daftar DHCP Server, IP Pool, dan DHCP Network
-        list_ds_command = "/ip dhcp-server print terse"
-        list_pool_command = "/ip pool print terse"
-        list_lease_command = "/ip dhcp-server lease print count-only"
-        list_network_command = "/ip dhcp-server network print terse"
+        # Pilih interface
+        interface = st.selectbox("Pilih Interface untuk DHCP Server", ["ether1", "ether2", "ether3", "ether4", "wlan1", "wlan2"])
+        subnet = get_ip(interface)
 
-        # Eksekusi perintah MikroTik
-        output_ds, error_ds = execute_command(st.session_state.ssh_client, list_ds_command)
-        output_pool, error_pool = execute_command(st.session_state.ssh_client, list_pool_command)
-        output_lease, error_lease = execute_command(st.session_state.ssh_client, list_lease_command)
-        output_network_list, error_network_list = execute_command(st.session_state.ssh_client, list_network_command)
-
-        # Periksa error sebelum lanjut
-        if error_ds:
-            st.error(f"⚠️ Gagal mengambil daftar DHCP Server: {error_ds}")
-        elif error_pool:
-            st.error(f"⚠️ Gagal mengambil daftar IP Pool: {error_pool}")
-        elif error_lease:
-            st.error(f"⚠️ Gagal mengambil jumlah IP yang digunakan: {error_lease}")
-        elif error_network_list:
-            st.error(f"⚠️ Gagal mengambil daftar DHCP Network: {error_network_list}")
+        if not subnet:
+            st.warning("⚠️ Tidak dapat mengambil subnet dari interface yang dipilih. Pastikan interface memiliki IP.")
         else:
-            dhcp_data = []
-            headers = ["ID", "NAME", "INTERFACE", "RENTANG IP", "IP TERPAKAI", "DURASI"]
+            st.info(f"📌 IP Interface Terdeteksi: `{subnet}`")
 
-            dhcp_servers = output_ds.strip().split("\n") if output_ds else []
-            pools = output_pool.strip().split("\n") if output_pool else []
-            lease_count = output_lease.strip() if output_lease else "0"
+            # Rentang IP DHCP
+            range_option = st.selectbox(
+                "Pilih Rentang IP DHCP",
+                ["10-50", "51-100", "101-253", "Custom"]
+            )
 
-            for i, line in enumerate(dhcp_servers):
-                parts = line.split()
-                if len(parts) >= 5:
-                    dhcp_id = parts[0]
-                    name = parts[1]
-                    interface = parts[2]
-                    duration = parts[-1]
-                    ip_range = pools[i].split()[-1] if len(pools) > i else "Tidak diketahui"
-                    dhcp_data.append([dhcp_id, name, interface, ip_range, lease_count, duration])
-
-            if dhcp_data:
-                df = pd.DataFrame(dhcp_data, columns=headers)
-                st.table(df)
+            if range_option != "Custom":
+                start_ip_suffix, end_ip_suffix = map(int, range_option.split("-"))
+                st.info(f"📌 Rentang IP: {start_ip_suffix} - {end_ip_suffix}")
             else:
-                st.warning("⚠️ Tidak ada data DHCP Server yang tersedia.")
+                col1, col2 = st.columns(2)
+                with col1:
+                    start_ip_suffix = st.number_input("IP Awal (Custom)", min_value=2, max_value=253, value=10)
+                with col2:
+                    end_ip_suffix = st.number_input("IP Akhir (Custom)", min_value=2, max_value=254, value=100)
 
-        # 📌 Input Interface dan Konfigurasi DHCP Server
-        interface = st.selectbox("Pilih Interface", ["bridge", "ether1", "ether2", "wlan1"])
-        
-        get_ip_command = f"/ip address print where interface={interface}"
-        output_ip, error_ip = execute_command(st.session_state.ssh_client, get_ip_command)
-
-        base_ip, gateway, ip_interface = None, None, None
-        if error_ip or not output_ip or not output_ip.strip():
-            st.error(f"⚠️ Gagal mendapatkan IP Address untuk interface `{interface}`")
-        else:
-            lines = output_ip.strip().split("\n")
-            ip_info = lines[0].split()[1].split("/")[0] if len(lines[0].split()) > 1 else None
-            if ip_info:
-                base_ip = "".join(ip_info.split(".")[:3])
-                gateway = f"{ip_info}"  # Menggunakan IP interface sebagai gateway
-                ip_interface = f"{ip_info}/24"
+            # Lease time dengan preset
+            lease_option = st.selectbox("Pilih Durasi Lease Time", ["12h", "1d", "3d", "Custom"])
+            if lease_option == "Custom":
+                lease_time = st.text_input("Durasi Lease (Contoh: 2h, 4d)", value="1h")
             else:
-                st.error("⚠️ Format IP Address tidak valid.")
+                lease_time = lease_option
 
-        # 📌 Input Rentang IP
-        mode = st.selectbox("Pilih Rentang IP", ["Default (2-254)", "Custom"], index=0)
-        if mode == "Default (2-254)":
-            pool_start_suffix, pool_end_suffix = 2, 254
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                pool_start_suffix = st.number_input("Awal (2-254)", min_value=2, max_value=254, value=10, step=1)
-            with col2:
-                pool_end_suffix = st.number_input("Akhir (2-254)", min_value=2, max_value=254, value=100, step=1)
+            save_btn = st.button("🚀 Aktifkan DHCP Server")
 
-        # 📌 Pilih Durasi DHCP
-        lease_time = st.selectbox("Pilih Durasi Lease Time", ["12h", "1d", "3d", "Custom"])
-        if lease_time == "Custom":
-            lease_time = st.text_input("Masukkan Durasi", placeholder="12h")
-
-        # 📌 Tombol Simpan DHCP Server
-        if st.button("Simpan DHCP Server"):
-            if not (pool_start_suffix and pool_end_suffix and gateway and lease_time and base_ip):
-                st.error("⚠️ Semua kolom harus diisi sebelum menyimpan konfigurasi DHCP Server!")
-            elif pool_start_suffix >= pool_end_suffix:
-                st.error("⚠️ Rentang IP tidak valid! Awal harus lebih kecil dari akhir.")
-            else:
-                address_pool = f"{base_ip}.{pool_start_suffix}-{base_ip}.{pool_end_suffix}"
-                
-                # Menentukan nama pool dengan angka bertambah
-                existing_pools = output_pool.strip().split("\n") if output_pool else []
-                pool_index = len(existing_pools) + 1
-                dhcp_pool_name = f"dhcp_pool_{pool_index}"
-
-                commands = [
-                    f"/ip pool add name={dhcp_pool_name} ranges={address_pool}",
-                    f"/ip dhcp-server add name=dhcp{pool_index} interface={interface} address-pool={dhcp_pool_name} lease-time={lease_time} disabled=no",
-                    f"/ip dhcp-server network add address={ip_interface} gateway={gateway} dns-server=8.8.8.8,8.8.4.4"
-                ]
-
-                for cmd in commands:
-                    output, error = execute_command(st.session_state.ssh_client, cmd)
-                    if error:
-                        st.error(f"⚠️ Gagal mengeksekusi perintah: {cmd}\nError: {error}")
-                        break
+            if save_btn:
+                if start_ip_suffix >= end_ip_suffix:
+                    st.error("⚠️ IP Awal harus lebih kecil dari IP Akhir.")
+                elif not validate_ip_range(start_ip_suffix, end_ip_suffix, subnet):
+                    st.error("⚠️ Rentang IP tidak valid dalam subnet.")
                 else:
-                    st.success("✅ DHCP Server dan DHCP Network berhasil dikonfigurasi!")
+                    # IP dasar dan IP untuk range
+                    ip_with_cidr = subnet.split("/")[0]
+                    base_ip = ip_with_cidr.rsplit(".", 1)[0]
+                    start_ip = f"{base_ip}.{start_ip_suffix}"
+                    end_ip = f"{base_ip}.{end_ip_suffix}"
+
+                    # Gateway otomatis dari IP interface (tanpa CIDR)
+                    gateway_ip = ip_with_cidr
+
+                    # DNS default Google
+                    dns_server = "8.8.8.8"
+
+                    # Pool & DHCP name
+                    pool_name = f"dhcp_pool_{interface}"
+                    dhcp_name = f"dhcp_{interface}"
+
+                    # Hitung network address
+                    network_address = get_network_address(subnet)
+
+                    # Perintah konfigurasi
+                    cmd_pool = f"/ip pool add name={pool_name} ranges={start_ip}-{end_ip}"
+                    cmd_dhcp_server = (
+                        f"/ip dhcp-server add address-pool={pool_name} interface={interface} "
+                        f"name={dhcp_name} lease-time={lease_time} disabled=no"
+                    )
+                    cmd_network = (
+                        f"/ip dhcp-server network add address={network_address} "
+                        f"gateway={gateway_ip} dns-server={dns_server}"
+                    )
+
+                    # Jalankan perintah
+                    errors = []
+                    for cmd in [cmd_pool, cmd_dhcp_server, cmd_network]:
+                        output, error = execute_command(st.session_state.ssh_client, cmd)
+                        if error:
+                            errors.append(error)
+
+                    # Tampilkan hasil
+                    if errors:
+                        for err in errors:
+                            st.error(f"❌ {err}")
+                    else:
+                        st.success("✅ DHCP Server berhasil dikonfigurasi!")
+
+
+
+
+
 
 
 
