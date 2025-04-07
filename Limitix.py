@@ -3,6 +3,8 @@ import paramiko
 import time
 import re
 import pandas as pd
+import plotly.express as px
+import ipaddress
 from streamlit_extras.app_logo import add_logo
 from streamlit_option_menu import option_menu
 
@@ -17,7 +19,6 @@ def connect_ssh(ip, username, password, port=22):
     except Exception as e:
         return None, f"❌ Connection Failed: {str(e)}"
 
-# Fungsi mengeksekusi perintah SSH
 def execute_command(ssh_client, command):
     if ssh_client is None:
         return None, "❌ SSH session not active"
@@ -26,9 +27,25 @@ def execute_command(ssh_client, command):
         stdin, stdout, stderr = ssh_client.exec_command(command)
         output = stdout.read().decode().strip()
         error = stderr.read().decode().strip()
-        return (output, None) if output else (None, error)
+
+        return output, error
     except Exception as e:
         return None, f"❌ Command Execution Failed: {str(e)}"
+    
+def parse_rate(rate_str):
+    try:
+        rate_str = rate_str.lower().replace("bps", "")
+        if "k" in rate_str:
+            return int(float(rate_str.replace("k", "")) * 1_000)
+        elif "m" in rate_str:
+            return int(float(rate_str.replace("m", "")) * 1_000_000)
+        elif "g" in rate_str:
+            return int(float(rate_str.replace("g", "")) * 1_000_000_000)
+        else:
+            return int(float(rate_str))
+    except:
+        return 0
+
 
 # Fungsi Logout
 def logout():
@@ -38,15 +55,49 @@ def logout():
         del st.session_state["username"]
         st.success("✅ You have logged out successfully!")
         st.stop()
+        
+def get_subnet(interface):
+    """Fungsi untuk mendapatkan subnet dari interface yang dipilih."""
+    if not interface:
+        return None  # Jika interface kosong, kembalikan None
+    
+    command = f"/ip address print where interface={interface}"
+    output, error = execute_command(st.session_state.ssh_client, command)
+
+    if error or not output:
+        return None  # Jika output None atau kosong, kembalikan None
+
+    lines = output.strip().split("\n")
+    for line in lines:
+        parts = line.split()
+        for part in parts:
+            if '/' in part:
+                return part
+
+    
+    return None
+
+def validate_ip_range(start_suffix, end_suffix, subnet):
+    """Memeriksa apakah rentang IP berada dalam subnet yang benar."""
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+        base_ip = str(network.network_address).rsplit('.', 1)[0]  # Ambil bagian awal IP (contoh: 192.168.1)
+        
+        start_ip = ipaddress.ip_address(f"{base_ip}.{start_suffix}")
+        end_ip = ipaddress.ip_address(f"{base_ip}.{end_suffix}")
+        
+        return start_ip in network and end_ip in network and start_ip < end_ip
+    except ValueError:
+        return False
 
 # **LOGIN FORM**
 if not st.session_state.get("logged_in"):
     with st.form(key="login_form"):
         st.subheader("🔐 Login to MikroTik")
-        ip_address = st.text_input("IP Address")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        port = st.text_input("Port", value=22)
+        ip_address = st.text_input("IP Address", label_visibility="visible")
+        username = st.text_input("Username", label_visibility="visible")
+        password = st.text_input("Password", type="password", label_visibility="visible")
+        port = st.text_input("Port", value=22, label_visibility="visible")
         submit_button = st.form_submit_button("Login")
 
     if submit_button:
@@ -71,8 +122,8 @@ else:
             st.session_state["menu"] = "User",
         menu = option_menu(
             "Menu" ,
-            ["Dashboard", "Manajemen IP Address", "Konfigurasi Wireless", "Firewall NAT", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth"],
-            icons=["house", "list-task", "wifi", "shield", "globe", "router", "server", "speedometer"],
+            ["Dashboard", "Manajemen IP Address", "Firewall", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth"],
+            icons=["house", "list-task", "shield", "globe", "router", "server", "speedometer"],
             default_index=0
         )
         if st.button("🚪 Logout"):
@@ -106,8 +157,7 @@ else:
         st.markdown("""
         **Fitur yang tersedia:**
         - 🌐 **Manajemen IP Address**
-        - 📡 **Konfigurasi Wireless**
-        - 🔥 **Firewall NAT**
+        - 🔥 **Firewall**
         - 🌎 **Konfigurasi DNS**
         - 🖥️ **DHCP Client**
         - 🏠 **DHCP Server**
@@ -139,7 +189,7 @@ else:
                             "Flag": flag if flag else "-",  # Jika flag kosong, isi dengan "-"
                             "IP Address": ip_address,
                             "Network": network,
-                            "Interface": interface
+                            "Interface": interface,
                         })
 
                 if data:
@@ -157,7 +207,7 @@ else:
 
         if save_btn and ip_address:
             if action == "Tambah":
-                # Pastikan IP belum ada sebelum menambah
+                # Cek apakah IP Address sudah ada
                 check_cmd = "/ip address print without-paging"
                 check_output, check_error = execute_command(st.session_state.ssh_client, check_cmd)
 
@@ -174,137 +224,165 @@ else:
                         st.error(f"⚠️ Gagal menambahkan IP {ip_address}: {error}")
                     else:
                         st.success(f"✅ IP Address {ip_address} berhasil ditambahkan.")
+                        st.rerun()
 
             elif action == "Hapus":
-                # Ambil semua IP Address yang ada
-                find_cmd = "/ip address print without-paging"
-                response = execute_command(st.session_state.ssh_client, find_cmd)
+                # Cek apakah IP Address ada di MikroTik
+                check_cmd = "/ip address print without-paging"
+                check_output, check_error = execute_command(st.session_state.ssh_client, check_cmd)
 
-                # Pastikan response valid
-                if response and isinstance(response, tuple) and len(response) == 2:
-                    find_output, find_error = response
-                else:
-                    find_output, find_error = None, "Gagal mendapatkan output dari perintah."
-
-                if find_error:
-                    st.error(f"⚠️ Gagal mencari IP {ip_address} untuk dihapus: {find_error}")
-                elif not find_output or find_output.strip() == "":
-                    st.warning(f"⚠️ Tidak ada IP Address yang ditemukan di MikroTik.")
-                else:
-                    # Ambil ID dari hasil output
-                    lines = find_output.split("\n")
-                    id_to_remove = None
-
+                if check_error:
+                    st.error(f"⚠️ Gagal mengecek IP {ip_address}: {check_error}")
+                elif check_output and ip_address in check_output:
+                    # Cari ID IP untuk dihapus
+                    lines = check_output.split("\n")
                     for line in lines:
                         if ip_address in line and interface in line:
                             match = re.search(r"^\s*(\d+)", line)  # Ambil ID dari awal baris
                             if match:
                                 id_to_remove = match.group(1)
+                                # Hapus IP berdasarkan ID
+                                remove_cmd = f"/ip address remove {id_to_remove}"
+                                remove_output, remove_error = execute_command(st.session_state.ssh_client, remove_cmd)
+
+                                if remove_error:
+                                    st.error(f"⚠️ Gagal menghapus IP {ip_address}: {remove_error}")
+                                else:
+                                    st.success(f"✅ IP {ip_address} berhasil dihapus.")
+                                    st.rerun()
                                 break
-
-                    if id_to_remove:
-                        cmd = f"/ip address remove numbers={id_to_remove}"
-                        remove_output, remove_error = execute_command(st.session_state.ssh_client, cmd)
-
-                        if remove_error:
-                            st.error(f"⚠️ Gagal menghapus IP {ip_address}: {remove_error}")
-                        else:
-                            st.success(f"✅ IP Address {ip_address} berhasil dihapus.")
                     else:
-                        st.error(f"⚠️ IP {ip_address} tidak ditemukan di interface {interface}.")
-
-
-# **KONFIGURASI WIRELESS**
-    elif menu == "Konfigurasi Wireless":
-        st.subheader("📡 Konfigurasi Wireless")
+                        st.warning(f"⚠️ IP Address {ip_address} tidak ditemukan di MikroTik.")
+                else:
+                    st.warning(f"⚠️ IP Address {ip_address} tidak ditemukan di MikroTik.")
         
-        # Menampilkan daftar SSID yang telah dikonfigurasi
-        list_ssid_command = "/interface wireless print"
-        output, error = execute_command(st.session_state.ssh_client, list_ssid_command)
+
+    # **FIREWALL**
+    elif menu == "Firewall":
+        st.subheader("🛡️ Konfigurasi Firewall Rules")
         
-        if error:
-            st.error(f"⚠️ Gagal mengambil daftar SSID: {error}")
+            # Fetch and display Layer7 protocol rules directly below the title
+        ssh_client = st.session_state.ssh_client
+        if not ssh_client:
+            st.error("⚠️ Koneksi SSH belum tersedia.")
         else:
-            st.text(output)
-        
-        interface = st.selectbox("Pilih Interface Wireless", ["wlan1", "wlan2"])
-        new_ssid = st.text_input("Masukkan SSID Baru")
-        new_password = st.text_input("Masukkan Password Baru", type="password")
-        wireless_mode = st.selectbox("Pilih Mode Wireless", ["ap-bridge", "station", "bridge", "wds-slave"])
-        save_btn = st.button("Simpan Konfigurasi")
-        
+            # Get all layer7 protocols
+            layer7_command = "/ip firewall layer7-protocol print"
+            output, error = execute_command(ssh_client, layer7_command)
+
+            if error:
+                st.error(f"⚠️ Gagal mengambil daftar Layer7 Protocols: {error}")
+            elif output is None or output.strip() == "":
+                st.warning("Tidak ada Website yang diblokir yang ditemukan.")
+            else:
+                # Process the output into a table
+                lines = output.split("\n")
+                data = []
+
+                for line in lines:
+                    match = re.search(r'^\s*(\d+)\s+(\S+)\s+(.*)', line)
+                    if match:
+                        id_value, name, regexp = match.groups()
+                        data.append({
+                            "ID": id_value,
+                            "Name": name,
+                            "Domain": regexp,
+                        })
+
+                if data:
+                    df = pd.DataFrame(data)
+                    st.write("### Daftar Website yang Diblokir dengan Layer7 Protocol:")
+                    st.dataframe(df)
+                else:
+                    st.warning("Tidak ada Layer7 protocol yang ditemukan.")
+
+        # Input domain website yang akan diblokir
+        blocked_website = st.text_input("Masukkan domain website yang ingin diblokir (misal: youtube.com)")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            save_btn = st.button("Blokir Website")
+        with col2:
+            reset_btn = st.button("Reset Blokir Website")
+
         if save_btn:
-            if not new_ssid or not new_password:
-                st.warning("⚠️ Harap isi SSID dan Password!")
-                st.stop()
+            ssh_client = st.session_state.ssh_client
+            if not ssh_client:
+                st.error("⚠️ Koneksi SSH belum tersedia.")
+            elif not blocked_website:
+                st.error("⚠️ Masukkan domain website yang valid.")
+            else:
+                layer7_name = f"Block_{blocked_website.replace('.', '_')}"
+                layer7_regex = f".*{blocked_website}.*"
 
-            commands = [
-                f'/interface wireless set {interface} ssid="{new_ssid}"',
-                f'/interface wireless security-profiles set default authentication-types=wpa2-psk wpa2-pre-shared-key="{new_password}"',
-                f'/interface wireless set {interface} mode={wireless_mode}'
-            ]
+                # 1️⃣ Menambahkan Layer7 Protocol
+                layer7_command = f'/ip firewall layer7-protocol add name={layer7_name} regexp="{layer7_regex}"'
+                output, error = execute_command(ssh_client, layer7_command)
 
-            for cmd in commands:
-                output, error = execute_command(st.session_state.ssh_client, cmd)
                 if error:
-                    st.error(f"⚠️ Gagal mengeksekusi: {error}")
-                    break
-            else:
-                st.success("✅ Konfigurasi Wireless berhasil diperbarui!")
-        
+                    st.error(f"⚠️ Gagal menambahkan Layer7 Protocol: {error}")
+                else:
+                    # 2️⃣ Menambahkan Address List
+                    address_list_command = f'/ip firewall address-list add list=Blocked_Websites address={blocked_website} comment="Blokir {blocked_website}"'
+                    output, error = execute_command(ssh_client, address_list_command)
 
-    # **FIREWALL NAT**
-    elif menu == "Firewall NAT":
-        st.subheader("🛡️ Konfigurasi Firewall NAT")
-        
-        chain = st.selectbox("Pilih Chain", ["srcnat", "dstnat"])
-        firewall_action = st.selectbox("Pilih Action", ["masquerade", "dst-nat", "src-nat", "accept", "drop"])
-        out_interface = st.text_input("Masukkan Out Interface (Misal: ether1)")
-        dst_ip = st.text_input("Masukkan IP Tujuan (Opsional untuk dstnat)")
-        dst_port = st.text_input("Masukkan Port Tujuan (Opsional untuk dstnat)", value="80")
-        src_ip = st.text_input("Masukkan IP Sumber (Opsional untuk blokir akses)")
-        action = st.selectbox("Pilih Aksi", ["Tambah", "Hapus"])
-        save_btn = st.button("Save")
-        
-        if save_btn:
-            if 'ssh_client' not in st.session_state or st.session_state.ssh_client is None:
-                st.error("⚠️ Koneksi SSH ke MikroTik belum tersedia. Silakan hubungkan terlebih dahulu.")
-            else:
-                if action == "Tambah":
-                    if chain == "srcnat":
-                        if firewall_action == "masquerade" and out_interface:
-                            cmd = f"/ip firewall nat add chain=srcnat action=masquerade out-interface={out_interface}"
-                        elif firewall_action == "drop" and src_ip:
-                            cmd = f"/ip firewall nat add chain=srcnat action=drop src-address={src_ip}"
-                        else:
-                            cmd = f"/ip firewall nat add chain=srcnat action={firewall_action}"
-                    else:  # dstnat
-                        if dst_ip:
-                            cmd = f"/ip firewall nat add chain=dstnat action=dst-nat to-addresses={dst_ip} to-ports={dst_port} protocol=tcp dst-port={dst_port}"
-                        else:
-                            st.error("⚠️ IP tujuan harus diisi untuk dst-nat.")
-                            cmd = ""
-                else:  # Hapus aturan NAT
-                    check_cmd = f"/ip firewall nat print where chain={chain}"
-                    output, error = execute_command(st.session_state.ssh_client, check_cmd)
-                    if not output or "no such item" in output:
-                        st.warning("⚠️ Tidak ada aturan yang cocok untuk dihapus.")
-                        cmd = ""
-                    else:
-                        cmd = f"/ip firewall nat remove [find where chain={chain}]"
-                
-                if cmd:
-                    output, error = execute_command(st.session_state.ssh_client, cmd)
                     if error:
-                        st.error(f"⚠️ Gagal mengeksekusi: {error}")
+                        st.error(f"⚠️ Gagal menambahkan Address List: {error}")
                     else:
-                        st.success(f"✅ Firewall NAT berhasil dikonfigurasi.")
+                        # 3️⃣ Menambahkan Filter Rule untuk Layer7 dan address list
+                        filter_layer7_command = f'/ip firewall filter add chain=forward protocol=tcp dst-port=80,443 action=drop dst-address-list=Blocked_Websites layer7-protocol={layer7_name} comment="Blokir {blocked_website}"'
+                        output, error = execute_command(ssh_client, filter_layer7_command)
+
+                        if error:
+                            st.error(f"⚠️ Gagal menambahkan filter firewall Layer7: {error}")
+                        else:
+                            if error:
+                                st.error(f"⚠️ Gagal menambahkan filter firewall Address List: {error}")
+                            else:
+                                st.success(f"✅ Website '{blocked_website}' berhasil diblokir dengan Layer7 dan Address List.")
+                                st.rerun()
+
+
+        if reset_btn:
+            ssh_client = st.session_state.ssh_client
+            if not ssh_client:
+                st.error("⚠️ Tidak ada koneksi SSH.")
+            else:
+                # 1️⃣ Menghapus semua filter rules
+                reset_filter_command = "/ip firewall filter remove [find]"
+                output, error = execute_command(ssh_client, reset_filter_command)
+                if error:
+                    st.error(f"⚠️ Gagal mereset filter firewall: {error}")
+                else:
+                    # 2️⃣ Menghapus semua Layer7 Protocol
+                    reset_layer7_command = "/ip firewall layer7-protocol remove [find]"
+                    output, error = execute_command(ssh_client, reset_layer7_command)
+                    if error:
+                        st.error(f"⚠️ Gagal mereset Layer7 Protocol: {error}")
+                    else:
+                        # 3️⃣ Menghapus semua Address List
+                        reset_address_list_command = "/ip firewall address-list remove [find]"
+                        output, error = execute_command(ssh_client, reset_address_list_command)
+                        if error:
+                            st.error(f"⚠️ Gagal mereset Address List: {error}")
+                        else:
+                            st.success("✅ Semua aturan firewall telah dihapus (Filter, Layer7, dan Address List).")
+                            st.rerun()
+
 
     # **DNS**                  
     elif menu == "Konfigurasi DNS":
         st.subheader("🌎 Konfigurasi DNS")
         
-        dns_server = st.text_input("Masukkan DNS Server (Misal: 8.8.8.8)")
+        dns_option = st.selectbox("Pilih DNS (Domain Name Server)", ["Google", "Cloudflare", "Custom DNS"])
+        
+        dns_server = ""
+        if dns_option == "Custom DNS":
+            dns_server = st.text_input("Masukkan DNS Server", placeholder="8.8.8.8")
+        elif dns_option == "Google":
+            dns_server = "8.8.8.8, 8.8.4.4"
+        elif dns_option == "Cloudflare":
+            dns_server = "1.1.1.1, 1.0.0.1"
+            
         allow_remote = st.checkbox("Allow Remote Requests", value=True)
         save_btn = st.button("Simpan Konfigurasi DNS")
         
@@ -329,77 +407,134 @@ else:
         if save_btn:
             st.caption("DNS Server yang Digunakan")
             dns_servers = get_dns_servers()
-            st.text("\n".join(dns_servers))        
+            st.text("\n".join(dns_servers)) 
 
-    
+
     # **DHCP Client*
     elif menu == "DHCP Client":
         st.subheader("📡 Konfigurasi DHCP Client")
+
+        # Form untuk menambah DHCP Client baru
         interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "wlan1"])
         add_default_route = st.checkbox("Tambahkan Default Route", value=True)
         save_btn = st.button("Simpan DHCP Client")
-        
+
         if save_btn:
-            cmd = f"/ip dhcp-client add interface={interface} add-default-route={'yes' if add_default_route else 'no'}"
-            output, error = execute_command(st.session_state.ssh_client, cmd)
-            if error:
-                st.error(f"⚠️ Gagal mengeksekusi: {error}")
+            if "ssh_client" in st.session_state and st.session_state.ssh_client:
+                cmd = f"/ip dhcp-client add interface={interface} add-default-route={'yes' if add_default_route else 'no'}"
+                output, error = execute_command(st.session_state.ssh_client, cmd)
+
+                if error:
+                    st.error(f"⚠️ Gagal mengeksekusi: {error}")
+                else:
+                    st.success("✅ DHCP Client berhasil ditambahkan!")
             else:
-                st.success("✅ DHCP Client berhasil ditambahkan!")
+                st.error("⚠️ Tidak ada koneksi SSH.")
+
+
     
     # **DHCP Server**
     elif menu == "DHCP Server":
         st.subheader("🖧 Konfigurasi DHCP Server")
 
-        # Menampilkan daftar DHCP Server yang telah dikonfigurasi dalam bentuk tabel
-        st.caption("📜 Daftar DHCP Server")
+        # Perintah untuk mendapatkan daftar DHCP Server, IP Pool, dan DHCP Network
         list_ds_command = "/ip dhcp-server print terse"
-        output, error = execute_command(st.session_state.ssh_client, list_ds_command)
+        list_pool_command = "/ip pool print terse"
+        list_lease_command = "/ip dhcp-server lease print count-only"
+        list_network_command = "/ip dhcp-server network print terse"
 
-        if error:
-            st.error(f"⚠️ Gagal mengambil daftar DHCP server: {error}")
+        # Eksekusi perintah MikroTik
+        output_ds, error_ds = execute_command(st.session_state.ssh_client, list_ds_command)
+        output_pool, error_pool = execute_command(st.session_state.ssh_client, list_pool_command)
+        output_lease, error_lease = execute_command(st.session_state.ssh_client, list_lease_command)
+        output_network_list, error_network_list = execute_command(st.session_state.ssh_client, list_network_command)
+
+        # Periksa error sebelum lanjut
+        if error_ds:
+            st.error(f"⚠️ Gagal mengambil daftar DHCP Server: {error_ds}")
+        elif error_pool:
+            st.error(f"⚠️ Gagal mengambil daftar IP Pool: {error_pool}")
+        elif error_lease:
+            st.error(f"⚠️ Gagal mengambil jumlah IP yang digunakan: {error_lease}")
+        elif error_network_list:
+            st.error(f"⚠️ Gagal mengambil daftar DHCP Network: {error_network_list}")
         else:
             dhcp_data = []
-            if output and isinstance(output, str) and output.strip():  # Cek apakah output tidak kosong
-                lines = output.strip().split("\n")
-                headers = ["ID", "INTERFACE", "ADDRESS POOL", "LEASE TIME", "STATUS"]
+            headers = ["ID", "NAME", "INTERFACE", "RENTANG IP", "IP TERPAKAI", "DURASI"]
 
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) >= 5:  # Pastikan jumlah kolom cukup
-                        dhcp_data.append(parts[:5])
+            dhcp_servers = output_ds.strip().split("\n") if output_ds else []
+            pools = output_pool.strip().split("\n") if output_pool else []
+            lease_count = output_lease.strip() if output_lease else "0"
 
-                if dhcp_data:
-                    df = pd.DataFrame(dhcp_data, columns=headers)
-                    st.table(df)
-                else:
-                    st.warning("⚠️ Tidak ada data DHCP Server yang tersedia.")
+            for i, line in enumerate(dhcp_servers):
+                parts = line.split()
+                if len(parts) >= 5:
+                    dhcp_id = parts[0]
+                    name = parts[1]
+                    interface = parts[2]
+                    duration = parts[-1]
+                    ip_range = pools[i].split()[-1] if len(pools) > i else "Tidak diketahui"
+                    dhcp_data.append([dhcp_id, name, interface, ip_range, lease_count, duration])
+
+            if dhcp_data:
+                df = pd.DataFrame(dhcp_data, columns=headers)
+                st.table(df)
             else:
-                st.warning("⚠️ Tidak ada output yang diterima dari perintah SSH.")
-    
+                st.warning("⚠️ Tidak ada data DHCP Server yang tersedia.")
+
+        # 📌 Input Interface dan Konfigurasi DHCP Server
         interface = st.selectbox("Pilih Interface", ["bridge", "ether1", "ether2", "wlan1"])
         
-        col1, col2 = st.columns(2)
-        with col1:
-            pool_start = st.text_input("Address Pool Awal", placeholder="192.168.1.10")
-        with col2:
-            pool_end = st.text_input("Address Pool Akhir", placeholder="192.168.1.100")
+        get_ip_command = f"/ip address print where interface={interface}"
+        output_ip, error_ip = execute_command(st.session_state.ssh_client, get_ip_command)
 
-        gateway = st.text_input("Masukkan Gateway (Misal: 192.168.1.1)")
-        dns_server = st.text_input("Masukkan DNS Server (Misal: 8.8.8.8)")
-        lease_time = st.text_input("Masukkan Lease Time (Misal: 12h)")
-
-        save_btn = st.button("Simpan DHCP Server")
-
-        if save_btn:
-            if not (pool_start and pool_end and gateway and dns_server and lease_time):
-                st.error("⚠️ Semua kolom harus diisi sebelum menyimpan konfigurasi DHCP Server!")
+        base_ip, gateway, ip_interface = None, None, None
+        if error_ip or not output_ip or not output_ip.strip():
+            st.error(f"⚠️ Gagal mendapatkan IP Address untuk interface `{interface}`")
+        else:
+            lines = output_ip.strip().split("\n")
+            ip_info = lines[0].split()[1].split("/")[0] if len(lines[0].split()) > 1 else None
+            if ip_info:
+                base_ip = "".join(ip_info.split(".")[:3])
+                gateway = f"{ip_info}"  # Menggunakan IP interface sebagai gateway
+                ip_interface = f"{ip_info}/24"
             else:
-                address_pool = f"{pool_start}-{pool_end}"
+                st.error("⚠️ Format IP Address tidak valid.")
+
+        # 📌 Input Rentang IP
+        mode = st.selectbox("Pilih Rentang IP", ["Default (2-254)", "Custom"], index=0)
+        if mode == "Default (2-254)":
+            pool_start_suffix, pool_end_suffix = 2, 254
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                pool_start_suffix = st.number_input("Awal (2-254)", min_value=2, max_value=254, value=10, step=1)
+            with col2:
+                pool_end_suffix = st.number_input("Akhir (2-254)", min_value=2, max_value=254, value=100, step=1)
+
+        # 📌 Pilih Durasi DHCP
+        lease_time = st.selectbox("Pilih Durasi Lease Time", ["12h", "1d", "3d", "Custom"])
+        if lease_time == "Custom":
+            lease_time = st.text_input("Masukkan Durasi", placeholder="12h")
+
+        # 📌 Tombol Simpan DHCP Server
+        if st.button("Simpan DHCP Server"):
+            if not (pool_start_suffix and pool_end_suffix and gateway and lease_time and base_ip):
+                st.error("⚠️ Semua kolom harus diisi sebelum menyimpan konfigurasi DHCP Server!")
+            elif pool_start_suffix >= pool_end_suffix:
+                st.error("⚠️ Rentang IP tidak valid! Awal harus lebih kecil dari akhir.")
+            else:
+                address_pool = f"{base_ip}.{pool_start_suffix}-{base_ip}.{pool_end_suffix}"
+                
+                # Menentukan nama pool dengan angka bertambah
+                existing_pools = output_pool.strip().split("\n") if output_pool else []
+                pool_index = len(existing_pools) + 1
+                dhcp_pool_name = f"dhcp_pool_{pool_index}"
+
                 commands = [
-                    f"/ip pool add name=dhcp_pool ranges={address_pool}",
-                    f"/ip dhcp-server add interface={interface} address-pool=dhcp_pool disabled=no lease-time={lease_time}",
-                    f"/ip dhcp-server network add address={gateway}/24 gateway={gateway} dns-server={dns_server}"
+                    f"/ip pool add name={dhcp_pool_name} ranges={address_pool}",
+                    f"/ip dhcp-server add name=dhcp{pool_index} interface={interface} address-pool={dhcp_pool_name} lease-time={lease_time} disabled=no",
+                    f"/ip dhcp-server network add address={ip_interface} gateway={gateway} dns-server=8.8.8.8,8.8.4.4"
                 ]
 
                 for cmd in commands:
@@ -408,68 +543,124 @@ else:
                         st.error(f"⚠️ Gagal mengeksekusi perintah: {cmd}\nError: {error}")
                         break
                 else:
-                    st.success("✅ DHCP Server berhasil dikonfigurasi!")
-                
+                    st.success("✅ DHCP Server dan DHCP Network berhasil dikonfigurasi!")
+
+
+
+
+
+                        
     # Limitasi & Monitoring Bandwidth
     elif menu == "Bandwidth":
-        st.subheader("📊 Limitasi & Monitoring Bandwidth (Queue Tree)")
+        st.subheader("📊 Limitasi & Monitoring Bandwidth")
 
-        # Input batas bandwidth & interface
-        bandwidth_limit = st.text_input("Masukkan batas bandwidth (kbps)", value="1000")
-        interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "ether3", "wlan1", "wlan2"])
+        bd_option = st.selectbox("Tentukan batas", ["100Mbps", "300Mbps", "500Mbps", "Custom Bandwidth"])
+
+        if bd_option == "Custom Bandwidth":
+            bandwidth = st.text_input("Masukkan batas bandwidth (kbps)", value=st.session_state.get("bandwidth_limit", "1000"))
+        else:
+            bandwidth_mapping = {"100Mbps": "100000", "300Mbps": "300000", "500Mbps": "500000"}
+            bandwidth = bandwidth_mapping[bd_option]
+
+        try:
+            max_limit = int(bandwidth) * 1000  # kbps → bps
+        except ValueError:
+            st.error("⚠️ Masukkan angka yang valid untuk bandwidth.")
+            st.stop()
+
+        interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "ether3", "wlan1", "wlan2"], index=0)
         limit_btn = st.button("Terapkan Batas Bandwidth")
 
-        if limit_btn and st.session_state.ssh_client:
-            max_limit = int(bandwidth_limit) * 1000  # Konversi kbps ke bps
+        if limit_btn and st.session_state.get("ssh_client"):
+            try:
+                ssh_client = st.session_state.ssh_client
+                st.session_state["bandwidth"] = bandwidth
 
-            # Hapus aturan lama jika ada
-            delete_commands = [
-                f"/queue tree remove [find name=Limit_{interface}_upload]",
-                f"/queue tree remove [find name=Limit_{interface}_download]",
-                f"/ip firewall mangle remove [find comment=Limit_{interface}]"
-            ]
-            for cmd in delete_commands:
-                execute_command(st.session_state.ssh_client, cmd)
-            
-            # Tambahkan Mangle untuk menandai paket upload & download
-            mangle_commands = [
-                f"/ip firewall mangle add chain=forward action=mark-packet new-packet-mark=Limit_{interface}_upload passthrough=no out-interface={interface} comment=Limit_{interface}",
-                f"/ip firewall mangle add chain=forward action=mark-packet new-packet-mark=Limit_{interface}_download passthrough=no in-interface={interface} comment=Limit_{interface}"
-            ]
-            for cmd in mangle_commands:
-                execute_command(st.session_state.ssh_client, cmd)
-            
-            # Tambahkan Queue Tree untuk membatasi bandwidth
-            queue_commands = [
-                f"/queue tree add name=Limit_{interface}_download parent=global packet-mark=Limit_{interface}_download max-limit={max_limit}",
-                f"/queue tree add name=Limit_{interface}_upload parent=global packet-mark=Limit_{interface}_upload max-limit={max_limit}"
-            ]
-            for cmd in queue_commands:
-                execute_command(st.session_state.ssh_client, cmd)
-            
-            st.success(f"✅ Batas bandwidth {bandwidth_limit} kbps diterapkan pada {interface}.")
+                delete_commands = [
+                    f"/queue tree remove [find name=Limit_{interface}_download]",
+                    f"/queue tree remove [find name=Limit_{interface}_upload]",
+                    f"/ip firewall mangle remove [find comment=Limit_{interface}]",
+                ]
+                for cmd in delete_commands:
+                    execute_command(ssh_client, cmd)
 
-        # Monitoring Bandwidth
+                mangle_commands = [
+                    f"/ip firewall mangle add chain=forward action=mark-packet new-packet-mark=Limit_{interface}_upload passthrough=yes out-interface={interface} comment=Limit_{interface}",
+                    f"/ip firewall mangle add chain=forward action=mark-packet new-packet-mark=Limit_{interface}_download passthrough=yes in-interface={interface} comment=Limit_{interface}",
+                ]
+                for cmd in mangle_commands:
+                    execute_command(ssh_client, cmd)
+
+                queue_commands = [
+                    f"/queue tree add name=Limit_{interface}_download parent={interface} packet-mark=Limit_{interface}_download limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=default priority=5",
+                    f"/queue tree add name=Limit_{interface}_upload parent={interface} packet-mark=Limit_{interface}_upload limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=default priority=6",
+                ]
+                for cmd in queue_commands:
+                    execute_command(ssh_client, cmd)
+
+                st.success(f"✅ Batas bandwidth {bandwidth} kbps diterapkan pada {interface}.")
+            except Exception as e:
+                st.error(f"⚠️ Terjadi kesalahan: {str(e)}")
+
+        # --- Monitoring Bandwidth ---
+        st.subheader("📡 Monitoring Bandwidth")
         monitor_btn = st.button("Mulai Monitoring")
+        if monitor_btn and st.session_state.get("ssh_client"):
+            st.session_state["monitoring"] = True
 
-        if monitor_btn and st.session_state.ssh_client:
+        data = []
+        if st.session_state.get("monitoring"):
             monitoring_area = st.empty()
+            chart_area = st.empty()
 
-            while True:
-                try:
-                    queue_command = f"/queue tree print where name~\"Limit_{interface}\""
-                    queue_output, error = execute_command(st.session_state.ssh_client, queue_command)
-
-                    traffic_command = f"/interface monitor-traffic interface={interface} once"
-                    traffic_output, error = execute_command(st.session_state.ssh_client, traffic_command)
+            try:
+                while True:
+                    ssh_client = st.session_state.ssh_client
+                    traffic_command = f"/queue tree print stats where name~'Limit_{interface}'"
+                    traffic_output, error = execute_command(ssh_client, traffic_command)
 
                     if error:
-                        monitoring_area.error(f"❌ Gagal monitoring: {error}")
-                    else:
-                        monitoring_area.text("📡 Output Monitoring:")
-                        monitoring_area.code(f"📊 Queue Tree Status:\n{queue_output}\n\n📡 Traffic Stats:\n{traffic_output}")
+                        monitoring_area.error(f"❌ Gagal mengambil data: {error}")
+                        break
 
-                    time.sleep(2)  # Update tiap 2 detik
-                except Exception as e:
-                    monitoring_area.error(f"⚠️ Terjadi kesalahan: {str(e)}")
-                    break
+                    rx, tx = 0, 0
+                    if traffic_output:
+                        for line in traffic_output.splitlines():
+                            if "name=" in line and "rate=" in line:
+                                parts = line.split()
+                                for part in parts:
+                                    if "rate=" in part:
+                                        rate_value = part.split("=")[-1].replace("bps", "").strip()
+                                        if rate_value.isdigit():
+                                            if "download" in line:
+                                                rx = int(rate_value)
+                                            elif "upload" in line:
+                                                tx = int(rate_value)
+
+                    if rx > max_limit or tx > max_limit:
+                        execute_command(ssh_client, f"/queue tree set [find name=Limit_{interface}_download] max-limit={max_limit}")
+                        execute_command(ssh_client, f"/queue tree set [find name=Limit_{interface}_upload] max-limit={max_limit}")
+                        status = "⚠️ Melebihi Batas! Otomatis Dikendalikan"
+                    else:
+                        status = "✅ Normal"
+
+                    data.append({"Time": time.strftime("%H:%M:%S"), "Download": rx, "Upload": tx})
+                    if len(data) > 20:
+                        data.pop(0)
+
+                    df = pd.DataFrame(data)
+                    monitoring_area.text(f"📡 Status: {status}")
+                    monitoring_area.code(f"⬇️ Download: {rx} bps | ⬆️ Upload: {tx} bps")
+
+                    if not df.empty:
+                        fig = px.line(df, x="Time", y=["Download", "Upload"], title="📊 Grafik Penggunaan Bandwidth")
+                        chart_area.plotly_chart(fig, use_container_width=True)
+
+                    time.sleep(5)
+            except Exception as e:
+                monitoring_area.error(f"⚠️ Monitoring dihentikan: {str(e)}")
+
+                
+                
+        
+
