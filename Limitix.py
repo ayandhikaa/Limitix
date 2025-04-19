@@ -92,6 +92,17 @@ def validate_ip_range(start_suffix, end_suffix, subnet):
         return start_ip in network and end_ip in network and start_ip < end_ip
     except ValueError:
         return False
+    
+def get_identity(ssh_client):
+    output, error = execute_command(ssh_client, "/system identity print")
+    if error or not output:
+        return "Unknown"
+    
+    match = re.search(r"name: (\S+)", output)
+    if match:
+        return match.group(1)
+    return "Unknown"
+
 
 # **LOGIN FORM**
 if not st.session_state.get("logged_in"):
@@ -120,13 +131,13 @@ else:
     # **SIDE MENU**
     st.title("🚀 LIMITIX - MikroTik Manager")
     with st.sidebar:
-        add_logo("https://upload.wikimedia.org/wikipedia/commons/4/42/MikroTik_Logo.png", height=80)
-        if st.button("👤" + st.session_state.get("username", "User")):
-            st.session_state["menu"] = "User",
+        identity = get_identity(st.session_state["ssh_client"])
+        if st.button(f"👤 {st.session_state.get('username', 'User')} @ {identity}"):
+            st.session_state["menu"] = "Setting"
         menu = option_menu(
             "Menu" ,
-            ["Dashboard", "Manajemen IP Address", "Firewall", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth"],
-            icons=["house", "list-task", "shield", "globe", "router", "server", "speedometer"],
+            ["Dashboard", "Manajemen IP Address", "Firewall", "Konfigurasi DNS", "DHCP Client", "DHCP Server", "Bandwidth", "Setting"],
+            icons=["house", "list-task", "shield", "globe", "router", "server", "speedometer", "gear"],
             default_index=0
         )
         if st.button("🚪 Logout"):
@@ -145,7 +156,139 @@ else:
         - 🖥️ **DHCP Client**
         - 🏠 **DHCP Server**
         - ⏱️ **Limitasi Bandwidth dan Monitoring**
+        - ⚙️ **Setting**
         """)
+        
+    # **SETTING PROFILE**
+    elif menu == "Setting" or st.session_state.get("menu") == "Setting":
+        st.subheader("👤 Setting Profile")
+
+        ssh_client = st.session_state["ssh_client"]
+        current_username = st.session_state.get("username", "")
+        current_identity = get_identity(ssh_client)
+
+        with st.form("profile_form"):
+            st.caption("Nama Pengguna")
+            st.text(current_username)
+
+            new_identity = st.text_input("🖋️ Nama Router (Identity)", value=current_identity)
+            new_password = st.text_input("🔒 Ganti Password Router", type="password", help="Masukkan password baru jika ingin mengganti.")
+
+            save_button = st.form_submit_button("💾 Simpan Perubahan")
+
+            if save_button:
+                if new_identity and new_identity != current_identity:
+                    set_identity_cmd = f'/system identity set name="{new_identity}"'
+                    _, identity_error = execute_command(ssh_client, set_identity_cmd)
+                    if identity_error:
+                        st.error(f"Gagal mengganti identity: {identity_error}")
+                    else:
+                        st.success("✅ Nama router berhasil diperbarui!")
+
+                if new_password:
+                    set_pass_cmd = f"/user set [find name={current_username}] password={new_password}"
+                    _, pass_error = execute_command(ssh_client, set_pass_cmd)
+                    if pass_error:
+                        st.error(f"Gagal mengganti password: {pass_error}")
+                    else:
+                        st.success("✅ Password berhasil diperbarui!")
+
+                st.rerun()
+
+        st.markdown("---")
+        st.write("### 🛡️ Backup & Restore Konfigurasi Router")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            backup_name = st.text_input("Masukkan Nama Backup")
+            if st.button("📥 Backup Konfigurasi"):
+                if not backup_name:
+                    st.warning("⚠️ Nama backup tidak boleh kosong.")
+                else:
+                    # 1. Jalankan perintah backup di MikroTik
+                    backup_cmd = f"/system backup save name={backup_name}"
+                    _, error = execute_command(ssh_client, backup_cmd)
+
+                    if error:
+                        st.error(f"Gagal membuat backup: {error}")
+                    else:
+                        st.success(f"✅ Backup berhasil dibuat: {backup_name}.backup")
+
+                        try:
+                            # 2. Gunakan SFTP untuk ambil file dari router
+                            sftp = ssh_client.open_sftp()
+                            remote_path = f"/{backup_name}.backup"
+                            local_path = f"/tmp/{backup_name}.backup"  # Untuk server Linux, atau pakai io.BytesIO() jika di cloud
+
+                            # Simpan ke buffer
+                            import io
+                            backup_buffer = io.BytesIO()
+                            sftp.getfo(remote_path, backup_buffer)
+                            sftp.close()
+
+                            backup_buffer.seek(0)  # Reset posisi ke awal buffer
+
+                            # 3. Tampilkan tombol unduh
+                            st.download_button(
+                                label="⬇️ Klik untuk Unduh File Backup",
+                                data=backup_buffer,
+                                file_name=f"{backup_name}.backup",
+                                mime="application/octet-stream"
+                            )
+                        except Exception as e:
+                            st.error(f"Gagal mengunduh file backup: {str(e)}")
+
+
+        with col2:
+            uploaded_file = st.file_uploader("📤 Upload File Konfigurasi (.backup)", type=["backup"])
+            if uploaded_file is not None:
+                st.success(f"✅ File {uploaded_file.name} berhasil diunggah.")
+
+                        # Tampilkan tombol restore jika berhasil upload
+                if st.button("♻️ Restore Konfigurasi"):
+                            with st.form("restore_form", clear_on_submit=True):
+                                st.warning("⚠️ Restore konfigurasi akan me-restart router. Harap konfirmasi password untuk melanjutkan.")
+                                confirm_password = st.text_input("🔑 Masukkan Password Router", type="password")
+                                confirm_button = st.form_submit_button("🔄 Konfirmasi dan Restore")
+
+                                if confirm_button:
+                                    try:
+                                        # Ambil IP dari koneksi SSH aktif
+                                        router_ip = st.session_state["ssh_client"].get_transport().getpeername()[0]
+                                        username = st.session_state["username"]
+
+                                        # Tes koneksi ulang untuk verifikasi password
+                                        test_ssh, msg = connect_ssh(router_ip, username, confirm_password)
+                                        if test_ssh is not None:
+                                            test_ssh.close()  # password valid, lanjut restore
+
+                                            # Eksekusi restore
+                                            load_cmd = f'/system backup load name={uploaded_file.name}'
+                                            output, error = execute_command(ssh_client, load_cmd)
+
+                                            if error:
+                                                st.error(f"Gagal restore konfigurasi: {error}")
+                                            else:
+                                                st.success("✅ Konfigurasi berhasil di-restore!")
+
+                                                # Eksekusi reboot setelah restore sukses
+                                                reboot_cmd = "/system reboot"
+                                                reboot_output, reboot_error = execute_command(ssh_client, reboot_cmd)
+
+                                                if reboot_error:
+                                                    st.warning("Restore berhasil, namun gagal memerintahkan restart. Silakan restart manual.")
+                                                else:
+                                                    st.info("♻️ Router sedang restart untuk menerapkan konfigurasi.")
+                                        else:
+                                            st.error("❌ Password salah. Gagal melanjutkan restore.")
+                                    except Exception as e:
+                                        st.error(f"Terjadi kesalahan: {str(e)}")
+
+
+
+
+
 
     # **MANAJEMEN IP ADDRESS**
     elif menu == "Manajemen IP Address":
@@ -239,7 +382,6 @@ else:
                 else:
                     st.warning(f"⚠️ IP Address {ip_address} tidak ditemukan di MikroTik.")
         
-
     # **FIREWALL**
     elif menu == "Firewall":
         st.subheader("🛡️ Konfigurasi Firewall Rules")
@@ -351,7 +493,6 @@ else:
                             st.success("✅ Semua aturan firewall telah dihapus (Filter, Layer7, dan Address List).")
                             st.rerun()
 
-
     # **DNS**                  
     elif menu == "Konfigurasi DNS":
         st.subheader("🌎 Konfigurasi DNS")
@@ -392,7 +533,6 @@ else:
             dns_servers = get_dns_servers()
             st.text("\n".join(dns_servers)) 
 
-
     # **DHCP Client*
     elif menu == "DHCP Client":
         st.subheader("📡 Konfigurasi DHCP Client")
@@ -413,8 +553,6 @@ else:
                     st.success("✅ DHCP Client berhasil ditambahkan!")
             else:
                 st.error("⚠️ Tidak ada koneksi SSH.")
-
-
     
     # **DHCP Server**
     elif menu == "DHCP Server":
@@ -437,7 +575,6 @@ else:
 
             if range_option != "Custom":
                 start_ip_suffix, end_ip_suffix = map(int, range_option.split("-"))
-                st.info(f"📌 Rentang IP: {start_ip_suffix} - {end_ip_suffix}")
             else:
                 col1, col2 = st.columns(2)
                 with col1:
@@ -446,7 +583,7 @@ else:
                     end_ip_suffix = st.number_input("IP Akhir (Custom)", min_value=2, max_value=254, value=100)
 
             # Lease time dengan preset
-            lease_option = st.selectbox("Pilih Durasi Lease Time", ["12h", "1d", "3d", "Custom"])
+            lease_option = st.selectbox("Pilih Durasi DHCP Server", ["12h", "1d", "3d", "Custom"])
             if lease_option == "Custom":
                 lease_time = st.text_input("Durasi Lease (Contoh: 2h, 4d)", value="1h")
             else:
@@ -504,15 +641,6 @@ else:
                     else:
                         st.success("✅ DHCP Server berhasil dikonfigurasi!")
 
-
-
-
-
-
-
-
-
-
                         
     # Limitasi & Monitoring Bandwidth
     elif menu == "Bandwidth":
@@ -565,66 +693,74 @@ else:
                 st.success(f"✅ Batas bandwidth {bandwidth} kbps diterapkan pada {interface}.")
             except Exception as e:
                 st.error(f"⚠️ Terjadi kesalahan: {str(e)}")
+                
+        st.subheader("📈 Monitoring Bandwidth")
 
-        # --- Monitoring Bandwidth ---
-        st.subheader("📡 Monitoring Bandwidth")
-        monitor_btn = st.button("Mulai Monitoring")
+        monitor_interface = st.selectbox(
+            "Pilih Interface untuk Monitoring",
+            ["ether1", "ether2", "ether3", "wlan1", "wlan2"],
+            index=0,
+            key="monitor_interface"
+        )
+
+        monitor_btn = st.button("Mulai Monitoring Upload & Download")
+
+        def get_queue_rate(ssh_client, queue_name):
+            try:
+                command = f'/queue tree print stats where name="{queue_name}"'
+                stdin, stdout, stderr = ssh_client.exec_command(command)
+                output = stdout.read().decode()
+
+                match = re.search(r"rate=(\d+)", output)
+                if match:
+                    rate_bps = float(match.group(1))
+                    return rate_bps / 1000  # to kbps
+                return 0
+            except Exception as e:
+                st.error(f"Gagal membaca queue stats untuk {queue_name}: {str(e)}")
+                return 0
+
         if monitor_btn and st.session_state.get("ssh_client"):
-            st.session_state["monitoring"] = True
-
-        data = []
-        if st.session_state.get("monitoring"):
-            monitoring_area = st.empty()
-            chart_area = st.empty()
+            ssh_client = st.session_state.ssh_client
+            data = {"Waktu": [], "Upload (kbps)": [], "Download (kbps)": []}
+            placeholder = st.empty()
 
             try:
-                while True:
-                    ssh_client = st.session_state.ssh_client
-                    traffic_command = f"/queue tree print stats where name~'Limit_{interface}'"
-                    traffic_output, error = execute_command(ssh_client, traffic_command)
+                for _ in range(60):  # 5 menit (60x iterasi dengan jeda 5 detik)
+                    timestamp = time.strftime("%H:%M:%S")
 
-                    if error:
-                        monitoring_area.error(f"❌ Gagal mengambil data: {error}")
-                        break
+                    # Pisahkan nama queue
+                    upload_queue = f"Limit_{monitor_interface}_upload"
+                    download_queue = f"Limit_{monitor_interface}_download"
 
-                    rx, tx = 0, 0
-                    if traffic_output:
-                        for line in traffic_output.splitlines():
-                            if "name=" in line and "rate=" in line:
-                                parts = line.split()
-                                for part in parts:
-                                    if "rate=" in part:
-                                        rate_value = part.split("=")[-1].replace("bps", "").strip()
-                                        if rate_value.isdigit():
-                                            if "download" in line:
-                                                rx = int(rate_value)
-                                            elif "upload" in line:
-                                                tx = int(rate_value)
+                    # Ambil data upload & download
+                    upload_rate = get_queue_rate(ssh_client, upload_queue)
+                    download_rate = get_queue_rate(ssh_client, download_queue)
 
-                    if rx > max_limit or tx > max_limit:
-                        execute_command(ssh_client, f"/queue tree set [find name=Limit_{interface}_download] max-limit={max_limit}")
-                        execute_command(ssh_client, f"/queue tree set [find name=Limit_{interface}_upload] max-limit={max_limit}")
-                        status = "⚠️ Melebihi Batas! Otomatis Dikendalikan"
-                    else:
-                        status = "✅ Normal"
+                    # Simpan data
+                    data["Waktu"].append(timestamp)
+                    data["Upload (kbps)"].append(upload_rate)
+                    data["Download (kbps)"].append(download_rate)
 
-                    data.append({"Time": time.strftime("%H:%M:%S"), "Download": rx, "Upload": tx})
-                    if len(data) > 20:
-                        data.pop(0)
-
+                    # Tampilkan grafik
                     df = pd.DataFrame(data)
-                    monitoring_area.text(f"📡 Status: {status}")
-                    monitoring_area.code(f"⬇️ Download: {rx} bps | ⬆️ Upload: {tx} bps")
 
-                    if not df.empty:
-                        fig = px.line(df, x="Time", y=["Download", "Upload"], title="📊 Grafik Penggunaan Bandwidth")
-                        chart_area.plotly_chart(fig, use_container_width=True)
+                    fig = px.line(
+                        df,
+                        x="Waktu",
+                        y=["Upload (kbps)", "Download (kbps)"],
+                        labels={"value": "Bandwidth (kbps)", "Waktu": "Waktu"},
+                        title=f"Monitoring Bandwidth di {monitor_interface}",
+                        markers=True,
+                    )
 
+                    fig.update_traces(line=dict(width=2))
+                    fig.for_each_trace(
+                        lambda t: t.update(line_color="orange") if t.name == "Upload (kbps)" else t.update(line_color="blue")
+                    )
+
+                    placeholder.plotly_chart(fig, use_container_width=True)
                     time.sleep(5)
+
             except Exception as e:
-                monitoring_area.error(f"⚠️ Monitoring dihentikan: {str(e)}")
-
-                
-                
-        
-
+                st.error(f"⚠️ Gagal mengambil data monitoring: {str(e)}")
