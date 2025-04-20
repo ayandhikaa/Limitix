@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import plotly.express as px
 import ipaddress
+import io
 from streamlit_extras.app_logo import add_logo
 from streamlit_option_menu import option_menu
 
@@ -57,7 +58,7 @@ def logout():
         del st.session_state["ssh_client"]
         del st.session_state["username"]
         st.success("✅ You have logged out successfully!")
-        st.stop()
+        st.rerun()
         
 def get_ip(interface):
     """Fungsi untuk mendapatkan subnet dari interface yang dipilih."""
@@ -106,6 +107,7 @@ def get_identity(ssh_client):
 
 # **LOGIN FORM**
 if not st.session_state.get("logged_in"):
+    st.header(" ⚡LIMITIX - MikroTik Manager")
     with st.form(key="login_form"):
         st.subheader("🔐 Login to MikroTik")
         ip_address = st.text_input("IP Address", label_visibility="visible")
@@ -147,7 +149,7 @@ else:
     # **DASHBOARD**
     if menu == "Dashboard":
         st.subheader("🏠 Selamat Datang di LIMITIX")
-        st.write("😉 LIMITIX adalah sistem manajemen MikroTik yang memudahkan konfigurasi jaringan Anda.")
+        st.write("⚡ LIMITIX adalah sistem manajemen MikroTik berbasis antarmuka yang memudahkan Anda mengelola dan mengkonfigurasi jaringan secara efisien. Dengan tampilan yang mudah digunakan dan fitur otomatis, LIMITIX cocok untuk pemula hingga teknisi profesional tanpa perlu repot menulis perintah manual.")
         st.markdown("""
         **Fitur yang tersedia:**
         - 🌐 **Manajemen IP Address**
@@ -156,7 +158,7 @@ else:
         - 🖥️ **DHCP Client**
         - 🏠 **DHCP Server**
         - ⏱️ **Limitasi Bandwidth dan Monitoring**
-        - ⚙️ **Setting**
+        - ⚙️ **Setting nama Router dan password serta backup konfigurasi**
         """)
         
     # **SETTING PROFILE**
@@ -196,99 +198,54 @@ else:
                 st.rerun()
 
         st.markdown("---")
-        st.write("### 🛡️ Backup & Restore Konfigurasi Router")
+        st.write("### 🛡️ Backup Konfigurasi Router")
 
-        col1, col2 = st.columns(2)
+        backup_buffer = None
+        backup_file_name = None
 
-        with col1:
+        with st.form("backup_form"):
             backup_name = st.text_input("Masukkan Nama Backup")
-            if st.button("📥 Backup Konfigurasi"):
+            submitted = st.form_submit_button("📥 Backup Konfigurasi")
+
+            if submitted:
                 if not backup_name:
                     st.warning("⚠️ Nama backup tidak boleh kosong.")
                 else:
-                    # 1. Jalankan perintah backup di MikroTik
-                    backup_cmd = f"/system backup save name={backup_name}"
-                    _, error = execute_command(ssh_client, backup_cmd)
+                    try:
+                        # 1. Jalankan perintah backup di MikroTik
+                        backup_cmd = f"/system backup save name={backup_name}"
+                        _, error = execute_command(ssh_client, backup_cmd)
 
-                    if error:
-                        st.error(f"Gagal membuat backup: {error}")
-                    else:
-                        st.success(f"✅ Backup berhasil dibuat: {backup_name}.backup")
+                        if error:
+                            st.error(f"Gagal membuat backup: {error}")
+                        else:
+                            st.success(f"✅ Backup berhasil dibuat: {backup_name}.backup")
 
-                        try:
-                            # 2. Gunakan SFTP untuk ambil file dari router
+                            # 2. Ambil file backup dari router via SFTP
                             sftp = ssh_client.open_sftp()
                             remote_path = f"/{backup_name}.backup"
-                            local_path = f"/tmp/{backup_name}.backup"  # Untuk server Linux, atau pakai io.BytesIO() jika di cloud
 
-                            # Simpan ke buffer
-                            import io
                             backup_buffer = io.BytesIO()
                             sftp.getfo(remote_path, backup_buffer)
                             sftp.close()
 
-                            backup_buffer.seek(0)  # Reset posisi ke awal buffer
+                            backup_buffer.seek(0)
+                            backup_file_name = f"{backup_name}.backup"
 
-                            # 3. Tampilkan tombol unduh
-                            st.download_button(
-                                label="⬇️ Klik untuk Unduh File Backup",
-                                data=backup_buffer,
-                                file_name=f"{backup_name}.backup",
-                                mime="application/octet-stream"
-                            )
-                        except Exception as e:
-                            st.error(f"Gagal mengunduh file backup: {str(e)}")
+                            st.session_state["backup_buffer"] = backup_buffer
+                            st.session_state["backup_file_name"] = backup_file_name
 
+                    except Exception as e:
+                        st.error(f"Gagal mengunduh file backup: {str(e)}")
 
-        with col2:
-            uploaded_file = st.file_uploader("📤 Upload File Konfigurasi (.backup)", type=["backup"])
-            if uploaded_file is not None:
-                st.success(f"✅ File {uploaded_file.name} berhasil diunggah.")
-
-                        # Tampilkan tombol restore jika berhasil upload
-                if st.button("♻️ Restore Konfigurasi"):
-                            with st.form("restore_form", clear_on_submit=True):
-                                st.warning("⚠️ Restore konfigurasi akan me-restart router. Harap konfirmasi password untuk melanjutkan.")
-                                confirm_password = st.text_input("🔑 Masukkan Password Router", type="password")
-                                confirm_button = st.form_submit_button("🔄 Konfirmasi dan Restore")
-
-                                if confirm_button:
-                                    try:
-                                        # Ambil IP dari koneksi SSH aktif
-                                        router_ip = st.session_state["ssh_client"].get_transport().getpeername()[0]
-                                        username = st.session_state["username"]
-
-                                        # Tes koneksi ulang untuk verifikasi password
-                                        test_ssh, msg = connect_ssh(router_ip, username, confirm_password)
-                                        if test_ssh is not None:
-                                            test_ssh.close()  # password valid, lanjut restore
-
-                                            # Eksekusi restore
-                                            load_cmd = f'/system backup load name={uploaded_file.name}'
-                                            output, error = execute_command(ssh_client, load_cmd)
-
-                                            if error:
-                                                st.error(f"Gagal restore konfigurasi: {error}")
-                                            else:
-                                                st.success("✅ Konfigurasi berhasil di-restore!")
-
-                                                # Eksekusi reboot setelah restore sukses
-                                                reboot_cmd = "/system reboot"
-                                                reboot_output, reboot_error = execute_command(ssh_client, reboot_cmd)
-
-                                                if reboot_error:
-                                                    st.warning("Restore berhasil, namun gagal memerintahkan restart. Silakan restart manual.")
-                                                else:
-                                                    st.info("♻️ Router sedang restart untuk menerapkan konfigurasi.")
-                                        else:
-                                            st.error("❌ Password salah. Gagal melanjutkan restore.")
-                                    except Exception as e:
-                                        st.error(f"Terjadi kesalahan: {str(e)}")
-
-
-
-
-
+        # 3. Tampilkan tombol unduh di luar form
+        if "backup_buffer" in st.session_state and "backup_file_name" in st.session_state:
+            st.download_button(
+                label="⬇️ Klik untuk Unduh File Backup",
+                data=st.session_state["backup_buffer"],
+                file_name=st.session_state["backup_file_name"],
+                mime="application/octet-stream"
+            )
 
     # **MANAJEMEN IP ADDRESS**
     elif menu == "Manajemen IP Address":
@@ -497,15 +454,17 @@ else:
     elif menu == "Konfigurasi DNS":
         st.subheader("🌎 Konfigurasi DNS")
         
-        dns_option = st.selectbox("Pilih DNS (Domain Name Server)", ["Google", "Cloudflare", "Custom DNS"])
+        dns_option = st.selectbox("Pilih DNS (Domain Name Server)", ["Google", "Cloudflare", "OpenDNS", "Custom DNS"])
         
         dns_server = ""
         if dns_option == "Custom DNS":
             dns_server = st.text_input("Masukkan DNS Server", placeholder="8.8.8.8")
         elif dns_option == "Google":
-            dns_server = "8.8.8.8, 8.8.4.4"
+            dns_server = "8.8.8.8"
         elif dns_option == "Cloudflare":
-            dns_server = "1.1.1.1, 1.0.0.1"
+            dns_server = "1.1.1.1"
+        elif dns_option == "OpenDNS":
+            dns_server = "208.67.222.222"
             
         allow_remote = st.checkbox("Allow Remote Requests", value=True)
         save_btn = st.button("Simpan Konfigurasi DNS")
@@ -538,7 +497,7 @@ else:
         st.subheader("📡 Konfigurasi DHCP Client")
 
         # Form untuk menambah DHCP Client baru
-        interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "wlan1"])
+        interface = st.selectbox("Pilih Interface", ["ether1", "ether2", "ether3", "ether4", "wlan1", "wlan2"])
         add_default_route = st.checkbox("Tambahkan Default Route", value=True)
         save_btn = st.button("Simpan DHCP Client")
 
@@ -640,8 +599,7 @@ else:
                             st.error(f"❌ {err}")
                     else:
                         st.success("✅ DHCP Server berhasil dikonfigurasi!")
-
-                        
+           
     # Limitasi & Monitoring Bandwidth
     elif menu == "Bandwidth":
         st.subheader("📊 Limitasi & Monitoring Bandwidth")
@@ -650,7 +608,7 @@ else:
 
         if bd_option == "Custom Bandwidth":
             bandwidth = st.text_input("Masukkan batas bandwidth (kbps)", value=st.session_state.get("bandwidth_limit", "1000"))
-        else:
+        else: 
             bandwidth_mapping = {"100Mbps": "100000", "300Mbps": "300000", "500Mbps": "500000"}
             bandwidth = bandwidth_mapping[bd_option]
 
@@ -669,10 +627,13 @@ else:
                 st.session_state["bandwidth"] = bandwidth
 
                 delete_commands = [
-                    f"/queue tree remove [find name=Limit_{interface}_download]",
-                    f"/queue tree remove [find name=Limit_{interface}_upload]",
-                    f"/ip firewall mangle remove [find comment=Limit_{interface}]",
-                ]
+                                f"/queue tree remove [find name=Limit_{interface}_download]",
+                                f"/queue tree remove [find name=Limit_{interface}_upload]",
+                                f"/ip firewall mangle remove [find comment=Limit_{interface}]",
+                                f"/queue type remove [find name=pcq-upload]",            
+                                f"/queue type remove [find name=pcq-download]",          
+                                f"/ip firewall filter remove [find comment=\"defconf: fasttrack\"]", 
+                            ]
                 for cmd in delete_commands:
                     execute_command(ssh_client, cmd)
 
@@ -682,10 +643,13 @@ else:
                 ]
                 for cmd in mangle_commands:
                     execute_command(ssh_client, cmd)
+                    
+                execute_command(ssh_client, f"/queue type add name=pcq-upload kind=pcq pcq-rate={max_limit} pcq-classifier=src-address") 
+                execute_command(ssh_client, f"/queue type add name=pcq-download kind=pcq pcq-rate={max_limit} pcq-classifier=dst-address")
 
                 queue_commands = [
-                    f"/queue tree add name=Limit_{interface}_download parent={interface} packet-mark=Limit_{interface}_download limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=default priority=5",
-                    f"/queue tree add name=Limit_{interface}_upload parent={interface} packet-mark=Limit_{interface}_upload limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=default priority=6",
+                    f"/queue tree add name=Limit_{interface}_download parent=global packet-mark=Limit_{interface}_download limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=pcq-download priority=5",
+                    f"/queue tree add name=Limit_{interface}_upload parent=global packet-mark=Limit_{interface}_upload limit-at={max_limit//2} max-limit={max_limit} burst-limit={int(max_limit*1.1)} burst-threshold={max_limit//2} burst-time=8s queue=pcq-upload priority=6",
                 ]
                 for cmd in queue_commands:
                     execute_command(ssh_client, cmd)
